@@ -6,6 +6,7 @@ import os
 from datetime import datetime
 from urllib.parse import urlparse, urljoin
 from bs4 import BeautifulSoup
+from utils import *
 
 class DB:
     def __init__(self, database_url, auth_token, headers):
@@ -49,7 +50,7 @@ class DB:
         self.cursor.executemany("INSERT OR IGNORE INTO platforms (name, url, cashback_value_path, cashback_description_path) VALUES (?, ?, ?, ?);", platforms_tuples)
         self.commit()
     
-    def create_partners(self):
+    def create_partners(self, js=False):
         print("CREATING PARTNERS...")
 
         stores = self.cursor.execute("SELECT * FROM stores").fetchall()
@@ -61,46 +62,14 @@ class DB:
             platform_name = platform[1]
             platform_url = platform[2]
             
-            parsed_url = urlparse(platform_url)
-            base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
-
-            response = requests.get(platform_url, headers=self.headers)
-            soup = BeautifulSoup(response.text, "html.parser")
-            html_as = soup.find_all("a")
+            platform_urls = get_platform_urls(platform_url, self.headers)
+            platform_partnerships = get_partnerships(stores, platform_urls, platform_id)
             
-            platform_links = {}
-            
-            for html_a in html_as:
-                url_path = html_a.get('href')
-                store_name = html_a.get_text(strip=True).lower()
+            if not platform_partnerships:
+                platform_urls = get_platform_urls_with_js(platform_url, self.headers)
+                platform_partnerships = get_partnerships(stores, platform_urls, platform_id)
 
-                if not url_path or not store_name:
-                    continue
-                    
-                if len(store_name) > 32:
-                    continue
-                
-                platform_links[store_name] = urljoin(base_url, url_path)
-
-            for store in stores:
-                store_id = store[0]
-                store_name = store[1].lower()
-                
-                best_name = difflib.get_close_matches(store_name, platform_links, n=1, cutoff=0.7)
-                if not best_name:
-                    print(f"ERRO: {store_name}")
-                    exit()
-                
-                best_name = best_name[0]
-                partnership_link = platform_links[best_name]
-                
-                partnership = {
-                    "store_id": store_id,
-                    "platform_id": platform_id,
-                    "url": partnership_link
-                }
-
-                partnerships.append(partnership)
+            partnerships.extend(platform_partnerships)
 
         partnerships_tuples = [
             (p["store_id"], p["platform_id"], p["url"]) for p in partnerships
@@ -131,6 +100,9 @@ class DB:
         return partnerships
     
     def create_cashbacks(self, cashbacks):
+        if not cashbacks:
+            return
+        
         self.update_old_cashbacks_date_end(cashbacks)
         
         base_query = "INSERT OR IGNORE INTO cashbacks (partnership_id, value, description) VALUES "
@@ -145,8 +117,12 @@ class DB:
         self.cursor.execute(full_query, flattened_values)
         self.conn.commit()
         
-    def update_old_cashbacks_date_end(self, cashbacks_dict):
-        ids_to_check = ", ".join(map(str, cashbacks_dict.keys()))
+    def update_old_cashbacks_date_end(self, cashbacks):
+        print("UPDATING LAST CASHBACKS...")
+        if not cashbacks:
+            return
+        
+        ids_to_check = ", ".join(map(str, cashbacks.keys()))
 
         query = f"""
         UPDATE cashbacks
@@ -161,10 +137,34 @@ class DB:
                 GROUP BY partnership_id
                 HAVING id = MAX(id)
             )
-            WHERE diff_hours <= 1
+            WHERE diff_hours <= 6
         );
         """
         
         self.cursor.execute(query)
         self.conn.commit()
+    
+    def get_last_cashbacks(self):
+        query = """
+        SELECT partnership_id, value, description
+        FROM cashbacks
+        WHERE id IN (
+            SELECT MAX(id)
+            FROM cashbacks
+            GROUP BY partnership_id
+        );
+        """
+        self.cursor.execute(query)
+        rows = self.cursor.fetchall()
+        
+        cashbacks = {}
+        for row in rows:
+            cashback = {
+                "partnership_id": row[0],
+                "value": row[1],
+                "description": row[2]
+            }
+            cashbacks[row[0]] = cashback
+
+        return cashbacks
         
