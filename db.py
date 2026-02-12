@@ -1,11 +1,5 @@
 import libsql
-import requests
-import difflib
 import os
-
-from datetime import datetime
-from urllib.parse import urlparse, urljoin
-from bs4 import BeautifulSoup
 from utils import *
 
 class DB:
